@@ -75,6 +75,24 @@ def write_params(params):
         json.dump(params, f, indent=2, ensure_ascii=False, default=str)
 
 
+def process_url_with_retry(client, image_url):
+    for attempt in range(6):
+        try:
+            return client.process_url(image_url, **PROCESS_OPTIONS)
+        except Exception as e:
+            is_quota_error = (
+                "the gemini account supplied with this request is over its quota."
+                in str(e).lower()
+            )
+            if not is_quota_error or attempt == 5:
+                raise
+            print(
+                f"  --> Quota error: {e}. Waiting 60 seconds "
+                f"before retry {attempt + 1}/5."
+            )
+            time.sleep(60)
+
+
 # ---------------------------------------------------------------------------
 # Read input and record run parameters (written now so they exist even if the run crashes)
 # ---------------------------------------------------------------------------
@@ -85,7 +103,7 @@ run_params = {
     "run_id": RUN_ID,
     "run_start_time": run_start_dt.strftime("%Y-%m-%d %H:%M:%S"),
     "run_end_time": None,
-    "input_csv": os.path.abspath(CSV_FILE_PATH),
+    "input_csv": CSV_FILE_PATH,
     "index_column": INDEX_COLUMN_NAME,
     "url_column": URL_COLUMN_NAME,
     "num_records": len(df),
@@ -148,7 +166,7 @@ with VoucherVisionClient(
         try:
             # process_url takes the URL as its first argument and does not write
             # files locally, so the JSON is saved below.
-            result = client.process_url(image_url, **PROCESS_OPTIONS)
+            result = process_url_with_retry(client, image_url)
 
             # Save the full server response, same as `curl ... -o file.json`
             with open(json_path, "w", encoding="utf-8") as f:
@@ -192,12 +210,14 @@ with VoucherVisionClient(
             "request_id": request_id,
             "error": error_message,
         })
+        pd.DataFrame([log_records[-1]]).to_csv(
+            LOG_CSV_PATH, mode="a", header=len(log_records) == 1, index=False
+        )
 
 # ---------------------------------------------------------------------------
-# Save Processing Logs and finalize run parameters
+# Finalize run parameters
 # ---------------------------------------------------------------------------
 log_df = pd.DataFrame(log_records)
-log_df.to_csv(LOG_CSV_PATH, index=False)
 
 n_success = int((log_df["status"] == "Success").sum()) if len(log_df) else 0
 run_params["run_end_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
