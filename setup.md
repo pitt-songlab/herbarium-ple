@@ -8,7 +8,7 @@ conda create --prefix=/ix/ysong/projects/herbarium-ple/envs/vouchervision python
 ln -s /ix/ysong/projects/herbarium-ple/envs/vouchervision envs
 
 # Activate environment
-conda activate ./envs
+source activate ./envs
 
 # Install packages
 pip install vouchervision-go-client
