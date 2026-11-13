@@ -23,7 +23,11 @@ SERVER_URL = "https://vouchervision-go-738307415303.us-central1.run.app"
 API_KEY = os.environ.get("VVGO_API_KEY")
 VERTEX_PROJECT = os.environ.get("VVGO_VERTEX_PROJECT")
 VERTEX_REGION = os.environ.get("VVGO_VERTEX_REGION", "global")
-CLIENT_TIMEOUT = (15, 900)
+CLIENT_TIMEOUT = (15, 120)
+
+# Retry configuration for transient failures (timeout, connection errors, quota)
+MAX_RETRIES_ON_TRANSIENT = 5       # Number of retries for timeout/connection issues
+RETRY_DELAY_SECONDS = 5            # Initial delay between retries (increased for quota errors)
 
 # Processing options passed to process_url(). Kept in one place so the exact
 # settings used are also written to run_parameters.json.
@@ -76,21 +80,48 @@ def write_params(params):
 
 
 def process_url_with_retry(client, image_url):
-    for attempt in range(6):
+    for attempt in range(MAX_RETRIES_ON_TRANSIENT + 1):
         try:
             return client.process_url(image_url, **PROCESS_OPTIONS)
         except Exception as e:
-            is_quota_error = (
-                "the gemini account supplied with this request is over its quota."
-                in str(e).lower()
+            error_str = str(e).lower()
+            error_code = getattr(e, "error_code", "")
+            if error_code:
+                error_code = str(error_code).lower()
+            
+            # Identify error type
+            is_quota_error = "the gemini account supplied with this request is over its quota." in error_str
+            is_timeout_error = any(x in error_str for x in ["504", "timeout", "timed out", "deadline"])
+            is_connection_error = (
+                "client_connection_error" in error_code or
+                any(x in error_str for x in ["connection", "refused"])
             )
-            if not is_quota_error or attempt == 5:
+            
+            is_transient_error = is_timeout_error or is_connection_error
+            
+            # Don't retry if we've exhausted retries
+            if attempt >= MAX_RETRIES_ON_TRANSIENT:
                 raise
+            
+            if is_quota_error:
+                delay = 60
+                retry_msg = f"Quota error"
+            elif is_transient_error:
+                delay = RETRY_DELAY_SECONDS
+                retry_msg = "Transient error (timeout/connection)"
+            else:
+                # Not a retriable error
+                raise
+            
             print(
-                f"  --> Quota error: {e}. Waiting 60 seconds "
-                f"before retry {attempt + 1}/5."
+                f"  --> {retry_msg}: {e}. Waiting {delay} seconds "
+                f"before retry {attempt + 1}/{MAX_RETRIES_ON_TRANSIENT}."
             )
-            time.sleep(60)
+            time.sleep(delay)
+
+
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -220,10 +251,11 @@ with VoucherVisionClient(
 log_df = pd.DataFrame(log_records)
 
 n_success = int((log_df["status"] == "Success").sum()) if len(log_df) else 0
+n_failed = len(log_df) - n_success if len(log_df) else 0
 run_params["run_end_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 run_params["summary"] = {
     "succeeded": n_success,
-    "failed": len(log_df) - n_success,
+    "failed": n_failed,
     "total_duration_seconds": round(log_df["duration_seconds"].sum(), 2) if len(log_df) else 0,
     "total_request_cost_usd": round(pd.to_numeric(log_df["total_request_cost_usd"], errors="coerce").sum(), 6)
     if len(log_df) else 0,
